@@ -1,45 +1,17 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 
-#[derive(Clone, Copy)]
-enum SplitterDirection {
-    LEFT,
-    RIGHT,
-}
-
-struct Source {
-    position: usize,
-}
-
-#[derive(Clone)]
-struct Splitter {
-    position: usize,
-    direction: SplitterDirection,
-    flip_count: usize,
-}
-
-impl Splitter {
-    fn new(position: usize) -> Self {
-        Self {
-            position,
-            direction: SplitterDirection::LEFT,
-            flip_count: 0,
-        }
-    }
-
-    fn flip(&mut self) {
-        self.direction = match self.direction {
-            SplitterDirection::LEFT => SplitterDirection::RIGHT,
-            SplitterDirection::RIGHT => SplitterDirection::LEFT,
-        };
-        self.flip_count += 1;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Coords {
+    x: usize,
+    y: usize,
 }
 
 enum Part {
-    Source(Source),
-    Void,
-    Splitter(Splitter),
+    Source(Coords),
+    Void(Coords),
+    Splitter(Coords),
     Other(()),
 }
 
@@ -51,14 +23,15 @@ impl Manifold {
     fn new(segments_raw: Vec<&str>) -> Self {
         let segments = segments_raw
             .iter()
-            .map(|segment| {
+            .enumerate()
+            .map(|(y, segment)| {
                 segment
                     .chars()
                     .enumerate()
-                    .map(|(position, part)| match part {
-                        '.' => Part::Void,
-                        '^' => Part::Splitter(Splitter::new(position)),
-                        'S' => Part::Source(Source { position }),
+                    .map(|(x, part)| match part {
+                        '.' => Part::Void(Coords { x, y }),
+                        '^' => Part::Splitter(Coords { x, y }),
+                        'S' => Part::Source(Coords { x, y }),
                         _ => Part::Other(()),
                     })
                     .collect::<Vec<Part>>()
@@ -66,131 +39,63 @@ impl Manifold {
             .collect::<Vec<Vec<Part>>>();
         Self { segments }
     }
-
-    fn any_bottom_splitter_reached_count(&self, count: usize) -> bool {
-        let last_segment = self
-            .segments
-            .get(self.segments.len().saturating_sub(2))
-            .expect("No vector to grab");
-        last_segment
-            .iter()
-            .filter(|part| matches!(part, Part::Splitter(_)))
-            .any(|part| match part {
-                Part::Splitter(splitter) => {
-                    let ret = splitter.flip_count >= count;
-                    println!("{}{}", ret, splitter.flip_count);
-                    ret
-                }
-                _ => false,
-            })
-    }
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct Ray {
-    position: usize,
-}
-
-struct Beam {
-    rays: Vec<Ray>,
-    split_count: usize,
-}
-
-impl Beam {
-    fn new() -> Self {
-        Self {
-            rays: Vec::new(),
-            split_count: 0,
-        }
-    }
-
-    fn spawn_beam(rays: &mut Vec<Ray>, position: usize) {
-        let new_ray = Ray { position };
-        if !rays.contains(&new_ray) {
-            rays.push(new_ray);
-        }
-    }
-
-    fn split_beam(rays: &mut Vec<Ray>, splitter: &Splitter) {
-        let splitter_position = splitter.position;
-        let split_left = splitter_position.saturating_sub(1);
-        let split_right = splitter_position.saturating_add(1);
-        let beam_position_idx = rays
-            .iter()
-            .position(|ray| splitter_position == ray.position)
-            .expect("No index found");
-        rays.remove(beam_position_idx);
-        Self::spawn_beam(rays, split_left);
-        Self::spawn_beam(rays, split_right);
-    }
-
-    fn simulate_beam_in_segment(&mut self, segment: &mut [Part]) {
-        for part in segment.iter_mut() {
-            match part {
-                Part::Source(source) => Self::spawn_beam(&mut self.rays, source.position),
-                Part::Void => (),
-                Part::Splitter(splitter) => {
-                    let is_beam_at_splitter = self.rays.contains(&Ray {
-                        position: splitter.position,
-                    });
-                    if is_beam_at_splitter {
-                        Self::split_beam(&mut self.rays, splitter);
-                        self.split_count += 1
-                    }
-                }
-                Part::Other(_) => (),
-            }
-        }
-    }
-}
-
-// Quantum beam needs to be casted until every splitter in manifold has been flipped twice
 #[derive(Clone)]
 struct QuantumBeam {
-    rays: Vec<Ray>,
+    beam_history: HashMap<Coords, usize>,
+    split_count: usize,
 }
 
 impl QuantumBeam {
     fn new() -> Self {
-        Self { rays: Vec::new() }
-    }
-
-    fn clear(&mut self) {
-        self.rays = Vec::new();
-    }
-
-    fn spawn_quantum_beam(rays: &mut Vec<Ray>, position: usize) {
-        let new_ray = Ray { position };
-        if !rays.contains(&new_ray) {
-            rays.push(new_ray);
+        Self {
+            beam_history: HashMap::new(),
+            split_count: 0,
         }
     }
-    fn direct_quantum_beam(rays: &mut Vec<Ray>, splitter: &mut Splitter) {
-        let beam_direction = match splitter.direction {
-            SplitterDirection::LEFT => splitter.position.saturating_sub(1),
-            SplitterDirection::RIGHT => splitter.position.saturating_add(1),
-        };
-        let beam_position_idx = rays
-            .iter()
-            .position(|ray| ray.position == splitter.position)
-            .expect("No index found");
-        rays.remove(beam_position_idx);
-        Self::spawn_quantum_beam(rays, beam_direction);
+
+    fn spawn_quantum_beams(&mut self, position: &Coords, beams_count: usize) {
+        *self.beam_history.entry(*position).or_insert(0) += beams_count;
     }
 
-    fn simulate_quantum_beam_in_segment(&mut self, segment: &mut [Part]) {
-        for part in segment.iter_mut() {
+    fn split_quantum_beams(&mut self, splitter: &Coords, beams_count: usize) {
+        let split_left = Coords {
+            x: splitter.x.saturating_sub(1),
+            y: splitter.y,
+        };
+        let split_right = Coords {
+            x: splitter.x.saturating_add(1),
+            y: splitter.y,
+        };
+        self.spawn_quantum_beams(&split_left, beams_count);
+        self.spawn_quantum_beams(&split_right, beams_count);
+    }
+
+    fn simulate_quantum_beam_in_segment(&mut self, segment: &[Part]) {
+        for part in segment.iter() {
             match part {
-                Part::Source(source) => Self::spawn_quantum_beam(&mut self.rays, source.position),
-                Part::Void => (),
+                Part::Source(source) => self.spawn_quantum_beams(source, 1),
+                Part::Void(void) => {
+                    let above_void = Coords {
+                        x: void.x,
+                        y: void.y.saturating_sub(1),
+                    };
+                    let beam_superposition_count = self.beam_history.get(&above_void).unwrap_or(&0);
+                    self.spawn_quantum_beams(void, *beam_superposition_count);
+                }
                 Part::Splitter(splitter) => {
-                    let is_beam_above = self.rays.contains(&Ray {
-                        position: splitter.position,
-                    });
-                    if is_beam_above {
-                        Self::direct_quantum_beam(&mut self.rays, splitter);
-                        splitter.flip();
+                    let above_splitter = Coords {
+                        x: splitter.x,
+                        y: splitter.y.saturating_sub(1),
+                    };
+                    let beam_superposition_count =
+                        self.beam_history.get(&above_splitter).unwrap_or(&0);
+
+                    if *beam_superposition_count > 0 {
+                        self.split_count += 1;
                     }
+                    self.split_quantum_beams(splitter, *beam_superposition_count);
                 }
                 Part::Other(_) => (),
             }
@@ -199,26 +104,26 @@ impl QuantumBeam {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = "test";
+    let path = "input";
     let file = fs::read_to_string(path)?;
     let segments = file.lines().collect();
-    let mut manifold = Manifold::new(segments);
-    let mut beam = Beam::new();
-    for segment in &mut manifold.segments {
-        beam.simulate_beam_in_segment(segment);
-    }
-
-    println!("part 1: {}", beam.split_count);
+    let manifold = Manifold::new(segments);
 
     let mut quantum_beam = QuantumBeam::new();
-    let mut timelines = 0;
-    while !manifold.any_bottom_splitter_reached_count(2) {
-        quantum_beam.clear();
-        for segment in &mut manifold.segments {
-            quantum_beam.simulate_quantum_beam_in_segment(segment);
-        }
-        timelines += 1;
+    for segment in &manifold.segments {
+        quantum_beam.simulate_quantum_beam_in_segment(segment);
     }
+    println!("part 1: {}", quantum_beam.split_count);
+    let timelines = manifold
+        .segments
+        .last()
+        .expect("Vector is empty")
+        .iter()
+        .filter_map(|part| match part {
+            Part::Void(void) => quantum_beam.beam_history.get(void).copied(),
+            _ => None,
+        })
+        .sum::<usize>();
 
     println!("part 2: {}", timelines);
 
